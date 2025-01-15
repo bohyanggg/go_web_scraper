@@ -35,3 +35,36 @@ services:
       TOPIC: image-data
     networks:
       - default
+    
+  postgres_consumer:
+    image: postgres:15
+    container_name: postgres_consumer
+    environment:
+      POSTGRES_USER: consumer_user
+      POSTGRES_PASSWORD: consumer_password
+      POSTGRES_DB: consumer_db
+    ports:
+      - "5434:5432" # Dedicated port for this new database
+    volumes:
+      - postgres-consumer-data:/var/lib/postgresql/data
+
+  consumer:
+    build:
+      context: ./consumer
+    container_name: consumer
+    depends_on:
+      - kafka
+      - postgres_consumer
+    environment:
+      KAFKA_BROKER: kafka:9092
+      TOPIC: image-data
+      POSTGRES_HOST: postgres_consumer
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: consumer_user
+      POSTGRES_PASSWORD: consumer_password
+      POSTGRES_DB: consumer_db
+    networks:
+      - default
+
+volumes:
+  postgres-consumer-data:
