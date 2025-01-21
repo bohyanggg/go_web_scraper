@@ -31,7 +31,7 @@ services:
       - kafka
     environment:
       KAFKA_BROKER: kafka:9092
-      TARGET_URL: https://www.vesselfinder.com/ship-photos/117574
+      # TARGET_URL: https://www.vesselfinder.com/ship-photos/117574
       TOPIC: image-data
     networks:
       - default

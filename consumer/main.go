@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log"
+	"net/http"
+	"os"
 
 	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
@@ -71,15 +74,46 @@ func main() {
 			continue
 		}
 
+		// Download the image
+		resp, err := http.Get(imageData.URL)
+		if err != nil {
+			log.Printf("Failed to download image: %v", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		image, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Failed to read image data: %v", err)
+			continue
+		}
+
+		//
 		// Insert into PostgreSQL
-		log.Printf("Start inserting image data into PostgreSQL: %+v", imageData)
-		insertQuery := `INSERT INTO images (url, alt) VALUES ($1, $2)`
-		_, err = db.Exec(insertQuery, imageData.URL, imageData.Alt)
+		log.Printf("Start inserting image data into PostgreSQL")
+		insertQuery := `INSERT INTO images (url, alt, image) VALUES ($1, $2, $3)`
+		_, err = db.Exec(insertQuery, imageData.URL, imageData.Alt, image)
 		if err != nil {
 			log.Printf("Failed to insert data into PostgreSQL: %v", err)
 			continue
 		} else {
 			log.Printf("Inserted image data into PostgreSQL: %+v", imageData)
 		}
+
+		// Check to make sure binary data is correct
+		var picture []byte
+		var url, alt string
+		err = db.QueryRow(`SELECT image, url, alt FROM images WHERE id = $1`, 305).Scan(&picture, &url, &alt)
+		if err != nil {
+			log.Fatalf("Failed to query image data: %v", err)
+		}
+
+		// Save the binary data to a file
+		err = os.WriteFile("/tmp/output_image.jpg", picture, 0644)
+		if err != nil {
+			log.Fatalf("Failed to save image: %v", err)
+		}
+
+		log.Printf("Image saved as output_image.jpg from URL: %s (Alt: %s)", url, alt)
 	}
 }

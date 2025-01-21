@@ -38,7 +38,7 @@ func scrapeImages(targetURL string) []ImageData {
 	})
 
 	// Target the specific <img> element with id="main-photo"
-	c.OnHTML("img#main-photo", func(e *colly.HTMLElement) {
+	c.OnHTML("img.main-photo", func(e *colly.HTMLElement) {
 		imageURL := e.Attr("src")
 		altText := e.Attr("alt")
 
@@ -102,8 +102,12 @@ func sendToKafka(topic string, broker string, data []ImageData) {
 }
 
 func main() {
+	// get all imo that aren't already in vessel image table.
+	log.Println("Retrieving IMOs from db...")
+
 	log.Println("Starting the scraper...")
-	targetURL := os.Getenv("TARGET_URL")
+	// targetURL := os.Getenv("TARGET_URL")
+	targetURL := "https://www.vesselfinder.com/vessels/details/9308120"
 	if targetURL == "" {
 		log.Fatal("TARGET_URL environment variable is required")
 	}
