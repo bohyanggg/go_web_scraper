@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 
 	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
@@ -15,8 +14,10 @@ import (
 
 // ImageData represents the image data structure
 type ImageData struct {
-	URL string `json:"url"`
-	Alt string `json:"alt"`
+	URL  string `json:"url"`
+	Alt  string `json:"alt"`
+	Name string `json:"name"`
+	IMO  int    `json:"imo"`
 }
 
 func main() {
@@ -33,18 +34,19 @@ func main() {
 	log.Println("Successfully connected to PostgreSQL")
 	defer db.Close()
 
-	// Ensure the table exists
-	createTableQuery := `
-	CREATE TABLE IF NOT EXISTS images (
-		id SERIAL PRIMARY KEY,
-		url TEXT NOT NULL,
-		alt TEXT
-	);
-	`
-	_, err = db.Exec(createTableQuery)
-	if err != nil {
-		log.Fatalf("Failed to create table: %v", err)
-	}
+	// Ensure the table exists (below table is old table)
+
+	// createTableQuery := `
+	// CREATE TABLE IF NOT EXISTS images (
+	// 	id SERIAL PRIMARY KEY,
+	// 	url TEXT NOT NULL,
+	// 	alt TEXT
+	// );
+	// `
+	// _, err = db.Exec(createTableQuery)
+	// if err != nil {
+	// 	log.Fatalf("Failed to create table: %v", err)
+	// }
 
 	// Configure Kafka reader
 	reader := kafka.NewReader(kafka.ReaderConfig{
@@ -73,47 +75,48 @@ func main() {
 			log.Printf("Failed to unmarshal message: %v", err)
 			continue
 		}
+		// if no photo, dont insert into images table?
+		if imageData.Alt != "No photo" {
+			// Download the image
+			resp, err := http.Get(imageData.URL)
+			if err != nil {
+				log.Printf("Failed to download image: %v", err)
+				continue
+			}
+			defer resp.Body.Close()
 
-		// Download the image
-		resp, err := http.Get(imageData.URL)
-		if err != nil {
-			log.Printf("Failed to download image: %v", err)
-			continue
+			image, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("Failed to read image data: %v", err)
+				continue
+			}
+
+			// Insert into PostgreSQL
+			log.Printf("Start inserting image data into PostgreSQL")
+			insertQuery := `INSERT INTO images (url, alt, image, vessel_name, imo) VALUES ($1, $2, $3, $4, $5)`
+			_, err = db.Exec(insertQuery, imageData.URL, imageData.Alt, image, imageData.Name, imageData.IMO)
+			if err != nil {
+				log.Printf("Failed to insert data into PostgreSQL: %v", err)
+				continue
+			} else {
+				log.Printf("Inserted image data into PostgreSQL: %+v", imageData)
+			}
+
+			// // Check to make sure binary data is correct
+			// var picture []byte
+			// var url, alt string
+			// err = db.QueryRow(`SELECT image, url, alt FROM images WHERE id = $1`, 305).Scan(&picture, &url, &alt)
+			// if err != nil {
+			// 	log.Fatalf("Failed to query image data: %v", err)
+			// }
+
+			// // Save the binary data to a file inside the container, check the tmp folder
+			// err = os.WriteFile("/tmp/output_image.jpg", picture, 0644)
+			// if err != nil {
+			// 	log.Fatalf("Failed to save image: %v", err)
+			// }
+
+			// log.Printf("Image saved as output_image.jpg from URL: %s (Alt: %s)", url, alt)
 		}
-		defer resp.Body.Close()
-
-		image, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("Failed to read image data: %v", err)
-			continue
-		}
-
-		//
-		// Insert into PostgreSQL
-		log.Printf("Start inserting image data into PostgreSQL")
-		insertQuery := `INSERT INTO images (url, alt, image) VALUES ($1, $2, $3)`
-		_, err = db.Exec(insertQuery, imageData.URL, imageData.Alt, image)
-		if err != nil {
-			log.Printf("Failed to insert data into PostgreSQL: %v", err)
-			continue
-		} else {
-			log.Printf("Inserted image data into PostgreSQL: %+v", imageData)
-		}
-
-		// Check to make sure binary data is correct
-		var picture []byte
-		var url, alt string
-		err = db.QueryRow(`SELECT image, url, alt FROM images WHERE id = $1`, 305).Scan(&picture, &url, &alt)
-		if err != nil {
-			log.Fatalf("Failed to query image data: %v", err)
-		}
-
-		// Save the binary data to a file
-		err = os.WriteFile("/tmp/output_image.jpg", picture, 0644)
-		if err != nil {
-			log.Fatalf("Failed to save image: %v", err)
-		}
-
-		log.Printf("Image saved as output_image.jpg from URL: %s (Alt: %s)", url, alt)
 	}
 }

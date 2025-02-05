@@ -2,24 +2,31 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gocolly/colly"
+	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
 )
 
 type ImageData struct {
-	URL string `json:"url"`
-	Alt string `json:"alt"`
+	URL  string `json:"url"`
+	Alt  string `json:"alt"`
+	Name string `json:"name"`
+	IMO  int    `json:"imo"`
 }
 
-func scrapeImages(targetURL string) []ImageData {
-	images := []ImageData{}
+type VesselData struct {
+	IMO  int
+	Name string
+}
 
+func scrapeImages(targetURL string, image_data ImageData) ImageData {
 	// Create a new collector
 	c := colly.NewCollector()
 
@@ -33,7 +40,7 @@ func scrapeImages(targetURL string) []ImageData {
 	// Limit requests to reduce the risk of being blocked
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*vesselfinder.com*",
-		Delay:       3 * time.Second,
+		Delay:       1 * time.Second,
 		RandomDelay: 1 * time.Second,
 	})
 
@@ -42,12 +49,14 @@ func scrapeImages(targetURL string) []ImageData {
 		imageURL := e.Attr("src")
 		altText := e.Attr("alt")
 
-		if imageURL != "" {
-			images = append(images, ImageData{
-				URL: imageURL,
-				Alt: altText,
-			})
-		}
+		// if imageURL != "" {
+		// 	images = append(images, ImageData{
+		// 		URL: imageURL,
+		// 		Alt: altText,
+		// 	})
+		// }
+		image_data.URL = imageURL
+		image_data.Alt = altText
 	})
 
 	c.OnResponse(func(r *colly.Response) {
@@ -62,13 +71,12 @@ func scrapeImages(targetURL string) []ImageData {
 	// Visit the target URL
 	err := c.Visit(targetURL)
 	if err != nil {
-		log.Fatalf("Failed to visit target URL: %v", err)
+		log.Printf("Failed to visit target URL: %v", err)
 	}
-
-	return images
+	return image_data
 }
 
-func sendToKafka(topic string, broker string, data []ImageData) {
+func sendToKafka(topic string, broker string, data ImageData) {
 	writer := kafka.Writer{
 		Addr:     kafka.TCP(broker),
 		Topic:    topic,
@@ -77,58 +85,105 @@ func sendToKafka(topic string, broker string, data []ImageData) {
 
 	defer writer.Close()
 
-	for _, img := range data {
-		message, err := json.Marshal(img)
-		if err != nil {
-			log.Printf("Failed to serialize data: %v\n", err)
-			continue
-		}
+	message, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Failed to serialize data: %v\n", err)
+	}
 
-		log.Printf("Attempting to send message to Kafka: %s", string(message))
+	log.Printf("Attempting to send message to Kafka: %s", string(message))
 
-		err = writer.WriteMessages(
-			context.Background(),
-			kafka.Message{
-				Value: message,
-			},
-		)
+	err = writer.WriteMessages(
+		context.Background(),
+		kafka.Message{
+			Value: message,
+		},
+	)
 
-		if err != nil {
-			log.Printf("Failed to send message to Kafka: %v\n", err)
-		} else {
-			log.Printf("Message sent successfully to Kafka topic: %s", topic)
-		}
+	if err != nil {
+		log.Printf("Failed to send message to Kafka: %v\n", err)
+	} else {
+		log.Printf("Message sent successfully to Kafka topic: %s", topic)
 	}
 }
 
-func main() {
-	// get all imo that aren't already in vessel image table.
-	log.Println("Retrieving IMOs from db...")
+func getIMOs() ([]VesselData, error) {
+	postgresDSN := "postgresql://consumer_user:consumer_password@postgres_consumer:5432/consumer_db?sslmode=disable"
 
-	log.Println("Starting the scraper...")
-	// targetURL := os.Getenv("TARGET_URL")
-	targetURL := "https://www.vesselfinder.com/vessels/details/9308120"
-	if targetURL == "" {
-		log.Fatal("TARGET_URL environment variable is required")
+	// Connect to PostgreSQL
+	db, err := sql.Open("postgres", postgresDSN)
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		return nil, err
 	}
+	log.Println("Successfully connected to PostgreSQL")
+	defer db.Close()
 
-	broker := os.Getenv("KAFKA_BROKER")
-	if broker == "" {
-		log.Fatal("KAFKA_BROKER environment variable is required")
+	//fetch from db
+	log.Println("Retrieving names and IMOs from db...")
+	rows, err := db.Query(`SELECT DISTINCT imo, name FROM vessels WHERE imo NOT IN (SELECT imo FROM images WHERE imo IS NOT NULL)`)
+	if err != nil {
+		log.Fatalf("Failed to query for names and imo: %v", err)
+		return nil, err
+	}
+	vesseldata := []VesselData{}
+
+	for rows.Next() {
+		var imo int
+		var name string
+		if err := rows.Scan(&imo, &name); err != nil {
+			return vesseldata, err
+		}
+		vesseldata = append(vesseldata, VesselData{
+			IMO:  imo,
+			Name: name,
+		})
+	}
+	if err = rows.Err(); err != nil {
+		return vesseldata, err
+	}
+	return vesseldata, nil
+}
+
+func main() {
+	log.Println("Starting the scraper...")
+
+	// get all imo that aren't already in vessel image table.
+	vesseldata, err := getIMOs()
+	if len(vesseldata) == 0 {
+		log.Println("no new vessels !")
+	}
+	if err != nil {
+		log.Fatalf("Failed to get IMOs: %v", err)
 	}
 
 	topic := os.Getenv("TOPIC")
 	if topic == "" {
 		log.Fatal("TOPIC environment variable is required")
 	}
-
-	images := scrapeImages(targetURL)
-
-	for _, img := range images {
-		fmt.Printf("Image URL: %s, Alt Text: %s\n", img.URL, img.Alt)
+	broker := os.Getenv("KAFKA_BROKER")
+	if broker == "" {
+		log.Fatal("KAFKA_BROKER environment variable is required")
 	}
 
-	sendToKafka(topic, broker, images)
+	// targetURL := os.Getenv("TARGET_URL")
+	for i := 0; i < len(vesseldata); i++ {
+		image_data := ImageData{}
+		image_data.IMO = vesseldata[i].IMO
+		image_data.Name = vesseldata[i].Name
+
+		targetURL := "https://www.vesselfinder.com/vessels/details/"
+		targetURL += strconv.Itoa(vesseldata[i].IMO)
+		log.Printf("IMO %d : the targeted URL is: %s", i, targetURL)
+		data := scrapeImages(targetURL, image_data)
+		// for _, img := range images {
+		// 	fmt.Printf("Image URL: %s, Alt Text: %s\n", img.URL, img.Alt)
+		// }
+
+		if data.URL != "" {
+			sendToKafka(topic, broker, data)
+		}
+	}
+	//in the future, instead of container exit, persist the container and refresh every 30 min?
 	log.Println("Delaying container exit for debugging...")
 	time.Sleep(10 * time.Minute)
 	// fmt.Printf("%s", images[0])
